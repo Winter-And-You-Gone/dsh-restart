@@ -5,8 +5,6 @@ DeepSeek Harness（DSH）**纯插件**：会话头部加「🔄 重启 DSH」按
 
 **不修改任何 `@deepseek-ai/dsh-*` 源码。**
 
-> 本插件只负责"重启 + 自动续跑"。折叠/分组功能在独立的 `dsh-turn-fold` 插件里。
-
 ## 功能：一键重启 DSH（🔄 重启 DSH）+ 条件自动续跑
 
 会话头部有一个「🔄 重启 DSH」按钮：
@@ -63,14 +61,14 @@ Invoke-RestMethod -Method Post -ContentType 'application/json' `
 ## 安装
 
 ```powershell
-# 把插件目录放到你已有的插件目录（与 dsh-vision-opencode 同约定），然后：
+# 把插件目录放到你已有的 DSH 插件目录（~/.dsh/profiles/node_modules/ 下），然后运行：
 .\install.ps1 -PluginSource "C:\path\to\dsh-restart"
 # 不传参数时默认用脚本自身所在目录作为插件源
 ```
 
 脚本会：
 1. 在 `~/.dsh/profiles/node_modules/dsh-restart` 建 **Junction** 指向插件目录；
-2. 在 `~/.dsh/profiles/web/cordis.patch.yml` 追加一行 `- insert:` 注册；
+2. 在 `~/.dsh/profiles/web/cordis.patch.yml` 追加一个 `- insert:` 注册块；
 3. 校验 `require.resolve` 可解析。
 
 然后**完全退出 DSH 进程并重启**（这一次仍需手动，因为按钮本身要等插件加载后才出现）；
