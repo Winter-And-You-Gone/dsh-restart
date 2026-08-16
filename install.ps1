@@ -14,7 +14,11 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 if (-not $DshHome) { $DshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $HOME '.dsh' } }
-if (-not $ProfileDir) { $ProfileDir = Join-Path $DshHome 'profiles\web' }
+if (-not $ProfileDir) {
+  # 新版桌面用 profiles/desktop，旧版桌面用 profiles/web，自动识别。
+  $desktopProfile = Join-Path $DshHome 'profiles\desktop'
+  $ProfileDir = if (Test-Path -LiteralPath $desktopProfile) { $desktopProfile } else { Join-Path $DshHome 'profiles\web' }
+}
 if (-not $PluginSource) { $PluginSource = $PSScriptRoot }
 $PluginSource = (Resolve-Path -LiteralPath $PluginSource).Path
 

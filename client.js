@@ -70,6 +70,10 @@ window.__ModuleLoader__.load({
 					method: "POST",
 					headers: body !== null ? { "content-type": "application/json" } : undefined,
 					body: body
+				}).then(function (response) {
+					// 非 2xx（例如路由未注册返回 405）说明没有真正发起重启，
+					// 复位按钮，避免一直卡在"重启中…"。
+					if (!response.ok) setRestarting(false);
 				}).catch(function () {
 					setRestarting(false);
 				});

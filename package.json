@@ -1,9 +1,9 @@
 {
   "name": "dsh-restart",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "main": "index.js",
-  "description": "DeepSeek Harness 纯插件：会话头部一键重启 DSH（🔄 按钮，两次点击确认）+ 回合未结束时自动续跑（重启后自动发“继续”）。不改 DSH 源码。",
+  "description": "DeepSeek Harness 纯插件：会话头部一键重启 DSH（🔄 按钮，两次点击确认）+ 回合未结束时自动续跑（重启后自动发“继续”）。兼容旧版（DSH_DESKTOP=1）与新版（dsh-plugin-desktop v2，desktopRuntime.requestRestart）桌面宿主。不改 DSH 源码。",
   "license": "MIT",
   "engines": {
     "node": ">=20.3"

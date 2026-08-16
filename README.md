@@ -41,7 +41,7 @@ Invoke-RestMethod -Method Post -ContentType 'application/json' `
 
 你在对话里说一句"重启 DSH"，我就在回复末尾执行它：应用自动关、自动开、回合未结束则自动继续。
 
-### 为什么需要"复活进程 + 强杀"
+### 为什么需要"复活进程 + 强杀"（旧版桌面）
 
 桌面应用（Electron）对 host 只有监督、没有自动复活：host 一退出，桌面主进程理应
 `app.quit()`——但实测**经常不退出**（变成无子进程的僵尸一直挂着），导致只等它自然退出
@@ -52,11 +52,29 @@ Invoke-RestMethod -Method Post -ContentType 'application/json' `
 
 全程日志：`~/.dsh/storages/dsh-restart-revive.log`。
 
+### 新版 DSH Desktop（dsh-plugin-desktop v2）直接走原生 relaunch
+
+新桌面（`DSH Desktop.exe`，profile 目录为 `~/.dsh/profiles/desktop`）与旧版架构不同：
+
+- 宿主（Cordis host）**就是 Electron 主进程本身**，不再有"独立宿主进程 + 桌面监督器"；
+- 因此 `process.ppid` 不是应用本体（强杀会杀错进程），**不能再用 revive.mjs**；
+- 桌面宿主提供 `ctx.desktopRuntime`（`dsh-plugin-desktop` v2 的 `ElectronDesktopRuntime`），
+  插件识别到它时调用 **`desktopRuntime.requestRestart()`**——由 launcher 完成
+  `app.relaunch()` + `app.exit(0)`，干净地"关掉再打开"整个应用；
+- 旧版的环境变量 `DSH_DESKTOP=1` 在新桌面**不再设置**（改用 `DSH_DESKTOP_*` 一族），
+  这也是重装新版桌面后按钮失效的根因：插件用 `DSH_DESKTOP !== '1'` 判桌面时直接 no-op。
+  现在改为：`DSH_DESKTOP=1`（旧）**或** `ctx.desktopRuntime`（新）任一命中即启用。
+
+两种桌面共用：`POST /dsh-revive` 路由、续跑标记（`~/.dsh/storages/dsh-restart-resume.json`）、
+`agent/created` 自动注入"继续"。
+
 ### 边界与安全
 
-- 仅在桌面托管下注册（`DSH_DESKTOP=1`）；纯 CLI 宿主下按钮路由不存在。
+- 仅在桌面托管下注册（旧版 `DSH_DESKTOP=1`，新版提供 `ctx.desktopRuntime`）；
+  纯 CLI 宿主下按钮路由不存在。
 - 路由为 loopback 的 `POST /dsh-revive`，只影响本机。
-- 强杀只作用于用户主动请求重启的旧实例，不碰其他进程。
+- 强杀只作用于旧版桌面中用户主动请求重启的旧实例，不碰其他进程；
+  新版桌面用宿主原生 relaunch，不引入任何强杀。
 
 ## 安装
 
@@ -68,7 +86,8 @@ Invoke-RestMethod -Method Post -ContentType 'application/json' `
 
 脚本会：
 1. 在 `~/.dsh/profiles/node_modules/dsh-restart` 建 **Junction** 指向插件目录；
-2. 在 `~/.dsh/profiles/web/cordis.patch.yml` 追加一个 `- insert:` 注册块；
+2. 在 profile 的 `cordis.patch.yml` 追加一个 `- insert:` 注册块
+   （自动识别新版桌面 `~/.dsh/profiles/desktop/`，否则用旧版 `~/.dsh/profiles/web/`）；
 3. 校验 `require.resolve` 可解析。
 
 然后**完全退出 DSH 进程并重启**（这一次仍需手动，因为按钮本身要等插件加载后才出现）；
@@ -86,9 +105,11 @@ Remove-Item "$env:DSH_HOME\profiles\node_modules\dsh-restart" -Force   # 删 Jun
 - 会话头部有一个 `conversation.session.header.actions`（list 槽，按 `order` 升序渲染）；
   本插件以 `id: dsh-revive, order: 90` 注册按钮。
 - `client.js` 点击后 `fetch POST /dsh-revive`；`index.js` 在 `webServer` 上注册该路由：
-  先 `spawn` detached 的 `revive.mjs`，再请求宿主退出 —— 宿主提供 `ctx.appExit`
-  （CLI/headless 宿主）则调用并 3 秒兜底强退；**桌面 web 宿主不提供 `appExit`，
-  直接 `process.exit(0)`**（宿主退出 → 桌面监督器 `app.quit()` → 复活进程重新拉起应用）。
+  - **新版桌面**（`ctx.desktopRuntime` 存在）：直接 `desktopRuntime.requestRestart()`
+    —— launcher 完成 `app.relaunch()` + `app.exit(0)`，不 spawn 任何外部进程；
+  - **旧版桌面**（`DSH_DESKTOP=1`）：先 `spawn` detached 的 `revive.mjs`，再请求宿主退出
+    —— 宿主提供 `ctx.appExit` 则调用并 3 秒兜底强退；桌面 web 宿主不提供 `appExit`，
+    直接 `process.exit(0)`（宿主退出 → 桌面监督器 `app.quit()` → 复活进程重新拉起应用）。
 - 请求体带 `{ sessionId, text }` 且 agent 运行中时，先写"续跑标记"到
   `~/.dsh/storages/dsh-restart-resume.json`；重启后 `agent/created` 事件触发自动注入"继续"。
 

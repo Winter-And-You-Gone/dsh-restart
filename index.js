@@ -1,10 +1,14 @@
 // dsh-restart: DeepSeek Harness 插件（宿主半边）。
 //
-// 一键复活 + 自动续跑：桌面托管（DSH_DESKTOP=1）下注册 POST /dsh-revive。
-// 请求体可携带 { sessionId, text }：
-//   - 带 sessionId → 先写"续跑标记"（重启后自动向该会话发送 text，默认"继续"）；
-//   - 然后脱离地拉起 revive.mjs（等待桌面主进程退出后重新启动桌面应用）；
-//   - 再请求宿主优雅退出（ctx.appExit）；桌面监督器会让整个应用随之退出。
+// 一键复活 + 自动续跑：桌面托管下注册 POST /dsh-revive，兼容两代桌面宿主：
+//   - 旧版桌面（DSH_DESKTOP=1，宿主是独立进程）：脱离地拉起 revive.mjs
+//     （等桌面主进程退出，不退则强杀，再重新拉起应用），随后请求宿主退出；
+//   - 新版桌面（dsh-plugin-desktop v2，宿主即 Electron 主进程，提供
+//     ctx.desktopRuntime）：直接用宿主自带的 desktopRuntime.requestRestart()
+//     原生 relaunch——绝不能用 revive.mjs：此时 process.ppid 不是应用本体，
+//     taskkill 会杀错进程。
+// 请求体可携带 { sessionId, text }：带 sessionId 且 agent 运行中时先写"续跑标记"
+// （重启后自动向该会话发送 text，默认"继续"）。
 // 自动续跑：监听 agent/created —— 被标记的会话一旦由 web 端以完整 setup 创建/恢复
 // （重开该会话）即注入"继续"并清标记。
 // 注意：绝不能在启动时自己 agents.resume —— 那会造出一个"半成品 agent"
@@ -83,8 +87,13 @@ async function injectContinue(agent, marker) {
 }
 
 export function apply(ctx) {
-  // 只在桌面托管下提供整应用重启；纯 CLI / 无桌面宿主时保持纯占位。
-  if (process.env.DSH_DESKTOP !== '1') return
+  // 桌面宿主识别，兼容两代：
+  //   旧版：DSH_DESKTOP=1（独立宿主进程，无 desktopRuntime）；
+  //   新版：dsh-plugin-desktop v2 提供 ctx.desktopRuntime（宿主即 Electron 主进程）。
+  // 纯 CLI / 无桌面宿主时保持纯占位。
+  const desktopRuntime = ctx.get('desktopRuntime')
+  const legacyDesktop = process.env.DSH_DESKTOP === '1'
+  if (!legacyDesktop && !desktopRuntime) return
 
   // ---- 一键复活路由 ----
   ctx.inject(['webServer'], (wctx) => {
@@ -125,6 +134,31 @@ export function apply(ctx) {
               }
             }
           }
+
+          if (desktopRuntime) {
+            // ---- 新版桌面：宿主即 Electron 主进程，用原生 relaunch ----
+            // 由 dsh-plugin-desktop 的 launcher 完成 app.relaunch() + app.exit(0)，
+            // 不需要、也不能再用 revive.mjs（旧方案针对的是"宿主是独立子进程"的旧桌面）。
+            res.writeHead(200)
+            res.end('ok')
+            // 稍等让响应发出，再请求重启。
+            setTimeout(() => {
+              desktopRuntime.requestRestart().catch((error) => {
+                console.error('[dsh-restart] requestRestart failed:', error)
+                // 兜底：干净退出（不 relaunch），用户可手动再开一次。
+                const exit = ctx.get('appExit')
+                if (typeof exit === 'function') {
+                  try { exit(0) } catch {}
+                  setTimeout(() => process.exit(0), 3000)
+                } else {
+                  process.exit(0)
+                }
+              })
+            }, 400)
+            return
+          }
+
+          // ---- 旧版桌面（DSH_DESKTOP=1）：保留原"复活进程 + 强杀"方案 ----
           const desktopPid = process.ppid
           const exePath = process.execPath
           try {
