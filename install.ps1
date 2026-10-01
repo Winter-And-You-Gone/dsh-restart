@@ -1,8 +1,9 @@
 # dsh-restart 安装脚本
 # 纯插件安装：不改任何 @deepseek-ai/dsh-* 源码。
 #   1) 把插件包放进 profile 的 node_modules（Junction 链接，与 dsh-vision-opencode 同一约定）
-#   2) 在 profiles/web/cordis.patch.yml 注册一行 insert
-#   3) 重启 dsh + 刷新浏览器生效
+#   2) 在 profile 的 cordis.patch.yml 注册一行 insert
+#      （桌面 profile profiles/desktop 与旧版 profiles/web 自动识别）
+#   3) 重启 dsh 生效
 [CmdletBinding()]
 param(
   [string]$PluginSource,
@@ -85,4 +86,4 @@ Write-Host '安装完成。下一步：'
 Write-Host '  1) 完全退出 DSH（不是关窗口，是结束 dsh 进程）'
 Write-Host '  2) 重新启动 DSH，打开同一会话'
 Write-Host '  3) 浏览器刷新页面（若 DSH 自带窗口则重启即可）'
-Write-Host '验证：会话头部应出现「🔄 重启 DSH」按钮；点击两次即可让整个桌面应用重启。'
+Write-Host '验证：会话头部应出现无边框的线条「重启」图标按钮；点击两次即可让整个桌面应用重启。'

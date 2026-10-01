@@ -1,12 +1,20 @@
 // dsh-restart: DeepSeek Harness 插件（宿主半边）。
 //
-// 一键复活 + 自动续跑：桌面托管下注册 POST /dsh-revive，兼容两代桌面宿主：
+// 一键复活 + 自动续跑：桌面托管下注册 POST /dsh-revive，兼容三代桌面宿主：
 //   - 旧版桌面（DSH_DESKTOP=1，宿主是独立进程）：脱离地拉起 revive.mjs
 //     （等桌面主进程退出，不退则强杀，再重新拉起应用），随后请求宿主退出；
-//   - 新版桌面（dsh-plugin-desktop v2，宿主即 Electron 主进程，提供
+//   - 中间版桌面（dsh-plugin-desktop v2，宿主即 Electron 主进程，提供
 //     ctx.desktopRuntime）：直接用宿主自带的 desktopRuntime.requestRestart()
 //     原生 relaunch——绝不能用 revive.mjs：此时 process.ppid 不是应用本体，
-//     taskkill 会杀错进程。
+//     taskkill 会杀错进程；
+//   - 新版桌面（DSH Desktop 44.x / dsh-desktop-host，desktopRuntime 已不存在）：
+//     宿主降级回"Electron 主进程的 Node 子进程"（ELECTRON_RUN_AS_NODE=1，desktop
+//     profile）。宿主意外退出时主进程不会自动重启，而是弹"退出/重启/禁用插件"
+//     的致命错误对话框干等用户——所以重启旧版思路：先脱离地拉起 revive.mjs，
+//     再让宿主优雅退出（Cordis 树 dispose、存储落盘），revive.mjs 等宿主死后
+//     强杀卡在对话框上的主进程整棵树，最后重新拉起应用（process.execPath 即
+//     应用 exe，不带 ELECTRON_RUN_AS_NODE 启动它就是 GUI）。
+//     重启途中主进程可能闪现一次错误对话框并写一份崩溃报告，属预期、无害。
 // 请求体可携带 { sessionId, text }：带 sessionId 且 agent 运行中时先写"续跑标记"
 // （重启后自动向该会话发送 text，默认"继续"）。
 // 自动续跑：监听 agent/created —— 被标记的会话一旦由 web 端以完整 setup 创建/恢复
@@ -37,8 +45,8 @@ function reviveScriptPath() {
 }
 
 /** 启动脱离的复活进程：宿主退出后它仍存活，等待并重新拉起桌面应用。 */
-function spawnReviver(desktopPid, exePath) {
-  const child = spawn(process.execPath, [reviveScriptPath(), String(desktopPid), exePath], {
+function spawnReviver(waitPid, killPid, exePath) {
+  const child = spawn(process.execPath, [reviveScriptPath(), String(waitPid), String(killPid), exePath], {
     detached: true,
     stdio: 'ignore',
     windowsHide: true,
@@ -87,13 +95,18 @@ async function injectContinue(agent, marker) {
 }
 
 export function apply(ctx) {
-  // 桌面宿主识别，兼容两代：
+  // 桌面宿主识别，兼容三代：
   //   旧版：DSH_DESKTOP=1（独立宿主进程，无 desktopRuntime）；
-  //   新版：dsh-plugin-desktop v2 提供 ctx.desktopRuntime（宿主即 Electron 主进程）。
+  //   中间版：dsh-plugin-desktop v2 提供 ctx.desktopRuntime（宿主即 Electron 主进程）；
+  //   新版（44.x）：宿主降级回 Electron 主进程的 Node 子进程，其 spawn 命令行里固定带有
+  //   dsh-desktop-host 的入口路径——这是决定性特征（argv 在进程出生时就固定，不依赖
+  //   任何 cordis 服务查找）。CLI（包括手动跑 desktop profile）的 argv 不会有它；
+  //   有它的进程 ppid 必是 Electron 主进程。
   // 纯 CLI / 无桌面宿主时保持纯占位。
   const desktopRuntime = ctx.get('desktopRuntime')
   const legacyDesktop = process.env.DSH_DESKTOP === '1'
-  if (!legacyDesktop && !desktopRuntime) return
+  const desktopHostChild = process.argv.some((arg) => String(arg).includes('dsh-desktop-host'))
+  if (!legacyDesktop && !desktopRuntime && !desktopHostChild) return
 
   // ---- 一键复活路由 ----
   ctx.inject(['webServer'], (wctx) => {
@@ -136,7 +149,7 @@ export function apply(ctx) {
           }
 
           if (desktopRuntime) {
-            // ---- 新版桌面：宿主即 Electron 主进程，用原生 relaunch ----
+            // ---- 中间版桌面：宿主即 Electron 主进程，用原生 relaunch ----
             // 由 dsh-plugin-desktop 的 launcher 完成 app.relaunch() + app.exit(0)，
             // 不需要、也不能再用 revive.mjs（旧方案针对的是"宿主是独立子进程"的旧桌面）。
             res.writeHead(200)
@@ -158,11 +171,45 @@ export function apply(ctx) {
             return
           }
 
+          if (desktopHostChild) {
+            // ---- 新版桌面（44.x / dsh-desktop-host）：宿主是 Electron 主进程的 Node 子进程 ----
+            //  revive.mjs 的等待目标改为宿主自己（优雅退出、树 dispose），确认宿主死后
+            //  立即强杀主进程（process.ppid）整棵树，再重新拉起应用（process.execPath）。
+            const hostPid = process.pid
+            const shellPid = process.ppid
+            const exePath = process.execPath
+            try {
+              spawnReviver(hostPid, shellPid, exePath)
+            } catch (error) {
+              // 复活进程拉起失败 → 不重启；若本请求已写标记则清掉，
+              // 避免孤儿标记日后误触发续跑。
+              if (markerWritten) await clearMarker().catch(() => {})
+              res.writeHead(500)
+              res.end(String(error))
+              return
+            }
+            res.writeHead(200)
+            res.end('ok')
+            // 稍等让响应发出，再优雅退出宿主：appExit 走 shutdown.shutdown(0)
+            // （树 dispose，5 秒兜底强退）；进程仍可能被 IPC 管道挂住，3 秒后强制退出，
+            // 保证宿主必死 —— revive.mjs 看到宿主死后会去强杀主进程并拉起新实例。
+            setTimeout(() => {
+              const exit = ctx.get('appExit')
+              if (typeof exit === 'function') {
+                try { exit(0) } catch {}
+                setTimeout(() => process.exit(0), 3000)
+              } else {
+                process.exit(0)
+              }
+            }, 400)
+            return
+          }
+
           // ---- 旧版桌面（DSH_DESKTOP=1）：保留原"复活进程 + 强杀"方案 ----
           const desktopPid = process.ppid
           const exePath = process.execPath
           try {
-            spawnReviver(desktopPid, exePath)
+            spawnReviver(desktopPid, desktopPid, exePath)
           } catch (error) {
             // 复活进程拉起失败 → 不重启；若本请求已写标记则清掉，
             // 避免孤儿标记日后误触发续跑。
