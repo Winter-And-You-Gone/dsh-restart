@@ -17,8 +17,10 @@ DeepSeek Harness（DSH）**纯插件**：会话头部加一个无边框的纯线
    - 若**当前会话的 agent 正在运行（回合未结束）**，写入"续跑标记"（重启后自动发"继续"）；
      若 agent 已停止，则只重启、不续跑；
    - 按当前桌面代际选择重启方式（见下），无论如何保证宿主必退；
-3. 桌面应用随之整体退出，复活进程**确认旧实例退出（宽限期内不退就 `taskkill /F` 强杀）**，
-   再**自动重新启动**整个应用；
+3. 桌面应用随之整体重启：44.x 下 shell 收到插件借道发出的 fatal 通知后，自己走优雅
+   退出链并**原生 relaunch**（复活进程只负责替你点掉致命恢复对话框并见证新实例；
+   兜底才强杀 + 自行拉起）；旧版桌面则由复活进程**确认旧实例退出（宽限期内不退就
+   `taskkill /F` 强杀）**后重新启动应用；
 4. 重启后，被标记的会话一旦由 web 端正常创建/恢复（打开该会话），自动注入"继续"接着跑。
 
 > ⚠️ 重启会**短暂断开**当前会话（属预期）；回合未结束才会自动"继续"。
@@ -52,7 +54,7 @@ Invoke-RestMethod -Method Post -ContentType 'application/json' `
 | --- | --- | --- |
 | 旧版桌面 | 环境变量 `DSH_DESKTOP=1` | 复活进程等桌面主进程退出（8 秒宽限，不退 `taskkill /T /F`），再拉起应用 |
 | 中间版桌面（dsh-plugin-desktop v2） | `ctx.desktopRuntime` 存在 | 宿主原生 `desktopRuntime.requestRestart()`（`app.relaunch()` + `app.exit(0)`），不 spawn 任何外部进程 |
-| 新版桌面（DSH Desktop 44.x，`dsh-desktop-host`） | `profileContext.name === 'desktop'` **且** argv 带 `dsh-desktop-host` 入口路径 | 复活进程等宿主优雅退出 → 强杀 Electron 主进程树 → 拉起应用 |
+| 新版桌面（DSH Desktop 44.x，`dsh-desktop-host`） | `profileContext.name === 'desktop'` **且** argv 带 `dsh-desktop-host` 入口路径 | 借道 fatal IPC 弹恢复对话框 → 窗口助手点「重启应用」→ shell 优雅停宿主后原生 relaunch（兜底：强杀 + 自拉起） |
 
 ### 为什么需要"复活进程 + 强杀"（旧版桌面）
 
@@ -72,20 +74,36 @@ Invoke-RestMethod -Method Post -ContentType 'application/json' `
 - 宿主（Cordis host，`dsh-desktop-host`）以 **Node 模式**（`ELECTRON_RUN_AS_NODE=1`）跑在
   Electron 主进程之下，插件就在这个宿主进程里；`process.ppid` 即 Electron 主进程；
 - 宿主**意外退出时主进程不会自动重启**，而是弹出「退出 / 重启 / 禁用第三方插件」的
-  致命错误对话框，一直等用户点击——只等它自己退出永远等不到；
+  致命恢复对话框，一直等用户点击——审查 DSH 源码后确认：它是插件唯一够得着的
+  "应用级优雅收尾"杠杆（shell→宿主的 `shutdown` 优雅通道、renderer 桥、二次实例、
+  `dsh://` 协议均无重启入口；宿主→shell 的 IPC 是封闭白名单，仅有 `fatal` 一条
+  "让 shell 弹恢复对话框"的合法消息）；
 - 中间版（v2）的 `ctx.desktopRuntime` 在这一代**已不存在**，`DSH_DESKTOP=1` 也不再设置
   ——这就是插件在 44.x 下按钮失效的根因；
-- 所以本代重启流程（`revive.mjs` 三参数模式）：
-  1. 插件先脱离地拉起 `revive.mjs <hostPid> <shellPid> <exePath>`；
-  2. 插件请求宿主优雅退出（`ctx.appExit` → 树 dispose、存储落盘，3 秒兜底强退）；
-  3. `revive.mjs` 等宿主退出后，立即 **`taskkill /T /F` 强杀**卡在错误对话框上的主进程
-     整棵树（此刻宿主已死、复活进程已脱离父链，树杀不会误伤自己）；
-  4. 确认死透后重新拉起应用（`process.execPath` 即应用 exe，去掉 `ELECTRON_RUN_AS_NODE`
-     启动它就是 GUI）；新实例 5 秒内退出则退避重试（最多 5 次）。
-- 若宿主 dispose 卡死超 8 秒：`revive.mjs` 只强杀宿主单个进程（不带 `/T`——此时复活进程
-  还是宿主的孩子，树杀会自杀），再走主进程强杀兜底。
-- 代价：重启途中主进程可能**闪现一次**致命错误对话框，并写一份崩溃报告（logs 目录）——
-  属预期、无害，忽略即可。
+- 所以本代重启流程（`revive.mjs` 三参数模式）是"借对话框 + 让 shell 自己编排"：
+  1. 插件先脱离地拉起 `revive.mjs <hostPid> <shellPid> <exePath>`（"点击器 + 见证者"）；
+  2. 复活进程随即预热一个 PowerShell「窗口助手」（枚举 Win32 对话框、发 TaskDialog
+     消息），趁这几秒把脚本编译好、轮询就位；
+  3. 插件借宿主→shell 的 **fatal IPC 消息**（协议白名单内的合法消息，插件与宿主同
+     进程可直接 `process.send`）触发 shell 弹出上述恢复对话框（先写崩溃报告再弹窗）；
+  4. 对话框刚冒头，窗口助手就按标题（`DeepSeek Harness …` 前缀，跨 zh/en 生效）+
+     类 `#32770` + 归属主进程 pid 识别它，先 `SW_HIDE` 压掉闪窗，再发
+     `TDM_CLICK_BUTTON` 点「重启应用」（Electron `showMessageBox` 的按钮 id 即其在
+     buttons 数组的下标）——主进程随即走自身的完整优雅链：`backend.close()` → 向
+     宿主发 `shutdown` IPC → 宿主 Cordis 树 dispose、存储落盘、回 `shutdown-complete`
+     → `app.relaunch()` **原生拉起新实例**（execPath/argv 完全保真，无外部 launch
+     与单实例锁赛跑）；
+  5. 复活进程"见证"：确认宿主与主进程都退场、且出现了**晚于死亡时刻启动**的同名
+     新进程（StartTime 过滤，排除旧实例残留子进程）即功成身退，全程不再自己拉起；
+  6. 兜底（任一命中才走）：`TDM` 点击不奏效 → 回退 `WM_CLOSE`（等价点「退出应用」，
+     shell 退出但不 relaunch）；对话框 30 秒未出现 / 主进程 12 秒未退完 / PowerShell
+     助手不可用 / 未见证到新实例 → `taskkill /T /F` 强杀整棵树并自行拉起应用
+     （新实例 5 秒内退出则按 2s/3s/5s/8s 退避重试，最多 5 次）。
+- 若宿主 dispose 卡死超 12 秒：`revive.mjs` 只强杀宿主单个进程（不带 `/T`——此时复活
+  进程与窗口助手还是宿主的孩子，树杀会自杀），主进程随后仍走"对话框 → 优雅链"路径。
+- 代价：重启瞬间主进程的致命恢复对话框会闪现一次（窗口助手发现后立即 `SW_HIDE`，
+  可见时长压到约 1–3 帧），并写一份崩溃报告（报告先于对话框落盘，插件侧无法避免）
+  ——属预期、无害。彻底消除闪窗需上游为宿主→shell 增加"请求重启"的协议消息。
 
 > 中间版桌面（dsh-plugin-desktop v2，宿主即 Electron 主进程）仍走 `requestRestart()`
 > 原生 relaunch，不经过 revive.mjs——那时 `process.ppid` 不是应用本体，强杀会杀错进程。
@@ -147,5 +165,6 @@ Remove-Item "$env:DSH_HOME\profiles\node_modules\dsh-restart" -Force   # 删 Jun
 - 宿主半边只在应用启动时加载：**装好插件 / 改动 `index.js` 后，必须完全退出并重启一次
   桌面应用**，`/dsh-revive` 路由才存在。若只刷新了页面（图标已是新的）而宿主还是旧代码，
   点击会失败——此时图标会**变红 4 秒**提示，控制台有详情。
-- 新版桌面上每次一键重启都会在应用日志目录留下一份"宿主停止"的崩溃报告，
-  与重启时的错误对话框一样，属预期现象。
+- 新版桌面上每次一键重启都会在应用日志目录留下一份"宿主停止"的崩溃报告，且主进程的
+  恢复对话框会闪现不到半秒（随即被复活进程的窗口助手以 `WM_CLOSE` 关闭，主进程优雅
+  自退）——均属预期现象。

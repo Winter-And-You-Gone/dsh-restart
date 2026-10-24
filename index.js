@@ -9,12 +9,17 @@
 //     taskkill 会杀错进程；
 //   - 新版桌面（DSH Desktop 44.x / dsh-desktop-host，desktopRuntime 已不存在）：
 //     宿主降级回"Electron 主进程的 Node 子进程"（ELECTRON_RUN_AS_NODE=1，desktop
-//     profile）。宿主意外退出时主进程不会自动重启，而是弹"退出/重启/禁用插件"
-//     的致命错误对话框干等用户——所以重启旧版思路：先脱离地拉起 revive.mjs，
-//     再让宿主优雅退出（Cordis 树 dispose、存储落盘），revive.mjs 等宿主死后
-//     强杀卡在对话框上的主进程整棵树，最后重新拉起应用（process.execPath 即
-//     应用 exe，不带 ELECTRON_RUN_AS_NODE 启动它就是 GUI）。
-//     重启途中主进程可能闪现一次错误对话框并写一份崩溃报告，属预期、无害。
+//     profile）。宿主退出时主进程不会自动重启，而是弹"退出/重启/禁用第三方插件"
+//     的致命恢复对话框干等用户——它是插件唯一够得着的应用级优雅收尾杠杆。做法：
+//     先脱离地拉起 revive.mjs（"点击器 + 见证者"），再借宿主→shell 的 fatal IPC
+//     （协议白名单消息）让 shell 弹出该对话框；窗口助手按标题识别后先 SW_HIDE
+//     压掉闪窗，再 TDM_CLICK_BUTTON 点「重启应用」→ shell 走自身优雅链
+//     （backend.close() → shutdown IPC → 宿主 Cordis 树 dispose、存储落盘）→
+//     app.relaunch() 原生拉起新实例，reviver 见证到即功成身退。对话框未出现/只点
+//     成「退出应用」（WM_CLOSE 回退）/助手不可用/新实例未见证到时，才回退强杀整棵
+//     树并自行拉起（process.execPath 即应用 exe，不带 ELECTRON_RUN_AS_NODE 启动它
+//     就是 GUI）。重启途中会闪现一次（被 SW_HIDE 压短的）错误对话框并写一份崩溃
+//     报告，属预期、无害。
 // 请求体可携带 { sessionId, text }：带 sessionId 且 agent 运行中时先写"续跑标记"
 // （重启后自动向该会话发送 text，默认"继续"）。
 // 自动续跑：监听 agent/created —— 被标记的会话一旦由 web 端以完整 setup 创建/恢复
@@ -173,8 +178,12 @@ export function apply(ctx) {
 
           if (desktopHostChild) {
             // ---- 新版桌面（44.x / dsh-desktop-host）：宿主是 Electron 主进程的 Node 子进程 ----
-            //  revive.mjs 的等待目标改为宿主自己（优雅退出、树 dispose），确认宿主死后
-            //  立即强杀主进程（process.ppid）整棵树，再重新拉起应用（process.execPath）。
+            //  宿主不自己退，而是借宿主→shell 的 fatal IPC（协议白名单消息，插件与宿主
+            //  同进程可直接 process.send）让 shell 弹致命恢复对话框；revive.mjs 的窗口
+            //  助手对它点「重启应用」→ shell 走自身优雅链（backend.close() → shutdown
+            //  IPC → 宿主 Cordis 树 dispose、存储落盘）→ app.relaunch() 原生重启。
+            //  revive.mjs 只是"点击器 + 见证者"，只有对话框没被处理/新实例没出现时才
+            //  强杀整棵树并自行拉起（process.execPath 即应用 exe）。
             const hostPid = process.pid
             const shellPid = process.ppid
             const exePath = process.execPath
@@ -190,14 +199,21 @@ export function apply(ctx) {
             }
             res.writeHead(200)
             res.end('ok')
-            // 稍等让响应发出，再优雅退出宿主：appExit 走 shutdown.shutdown(0)
-            // （树 dispose，5 秒兜底强退）；进程仍可能被 IPC 管道挂住，3 秒后强制退出，
-            // 保证宿主必死 —— revive.mjs 看到宿主死后会去强杀主进程并拉起新实例。
+            // 稍等让响应发出，再请求重启。
             setTimeout(() => {
+              if (process.connected) {
+                try {
+                  process.send({ type: 'fatal', message: 'dsh-restart: planned restart' })
+                  return
+                } catch { /* IPC 通道意外关闭 → 退回自退路径 */ }
+              }
+              // 兜底：宿主自己优雅退出（shell 视作意外退出弹同一对话框；助手点
+              // 「重启应用」时对已死宿主做 stop() 是无害 no-op）。appExit 的树
+              // dispose 自带 5 秒兜底强退，这里对齐 5 秒再强制退出。
               const exit = ctx.get('appExit')
               if (typeof exit === 'function') {
                 try { exit(0) } catch {}
-                setTimeout(() => process.exit(0), 3000)
+                setTimeout(() => process.exit(0), 5000)
               } else {
                 process.exit(0)
               }
