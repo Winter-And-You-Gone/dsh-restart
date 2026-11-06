@@ -1,17 +1,17 @@
 # dsh-restart
 
-DeepSeek Harness（DSH）**纯插件**：会话头部加一个无边框的纯线条「重启」图标按钮（无文字），
+DeepSeek Harness（DSH）**纯插件**：侧栏左下角账户行（用户名右侧，也就是有更新时
+「安装并重启」按钮出现的位置）加一个无边框的纯线条「重启」图标按钮（无文字），
 让整个桌面应用一键重启；若重启时当前回合仍在运行，重启后自动"继续"接着跑。
 
 **不修改任何 `@deepseek-ai/dsh-*` 源码。**
 
 ## 功能：一键重启 DSH（线条图标按钮）+ 条件自动续跑
 
-会话头部有一个无边框的纯线条「重启」图标按钮（电源符号造型，无文字，线条颜色跟随
-界面文字色，悬停显示 tooltip；发起重启后图标呼吸闪烁表示进行中）。图标有两个挂载点：
-活跃会话显示在标题行动作区（带 sessionId，可写续跑标记）；**全新空白会话**（还没有
-任何消息）时框架会隐藏标题行动作区，此时图标自动补位到头部左侧引导位，发第一条
-消息后回到动作区：
+左下角账户行有一个无边框的纯线条「重启」图标按钮（电源符号造型，无文字，线条颜色跟随
+界面文字色，悬停显示 tooltip；发起重启后图标变成循环箭头并持续旋转表示进行中）。它位于用户名右侧、
+连接/更新指示器之前——有更新时「安装并重启」按钮出现的同一列；侧栏收起成窄条时按钮
+退回侧栏底部的动作区（避免挤进 36px 的账户行），展开后回到账户行：
 1. **第一次点击**进入确认态（图标变琥珀色，3 秒不点自动复位，防误触）；
 2. **再点一次**执行：
    - 若**当前会话的 agent 正在运行（回合未结束）**，写入"续跑标记"（重启后自动发"继续"）；
@@ -135,7 +135,7 @@ Invoke-RestMethod -Method Post -ContentType 'application/json' `
 3. 校验 `require.resolve` 可解析。
 
 然后**完全退出 DSH 进程并重启**（这一次仍需手动，因为按钮本身要等插件加载后才出现）；
-之后插件改动即可用头部「🔄 重启 DSH」按钮一键重启。
+之后插件改动即可用左下角账户行的「重启」图标一键重启。
 
 ## 卸载
 
@@ -146,8 +146,10 @@ Remove-Item "$env:DSH_HOME\profiles\node_modules\dsh-restart" -Force   # 删 Jun
 
 ## 工作原理（为什么不用改源码）
 
-- 会话头部有一个 `conversation.session.header.actions`（list 槽，按 `order` 升序渲染）；
-  本插件以 `id: dsh-revive, order: 90` 注册按钮。
+- 侧栏底部有一个 `sidebar.footer.action`（list 槽，root 作用域）；本插件以
+  `id: dsh-revive, order: 90` 注册组件。框架没有给账户行开放插槽，组件再用
+  `react-dom` 的 portal 把按钮挂进 `settings.launcher` 锚点所在行（用户名右侧、
+  更新指示器之前），宿主节点被重渲染挤掉时由 MutationObserver 自动补挂。
 - `client.js` 点击后 `fetch POST /dsh-revive`；`index.js` 在 `webServer` 上注册该路由：
   - **中间版桌面**（`ctx.desktopRuntime` 存在）：直接 `desktopRuntime.requestRestart()`；
   - **新版桌面**（desktop profile + argv 带 `dsh-desktop-host`）：spawn 三参数
